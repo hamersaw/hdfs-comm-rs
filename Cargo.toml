@@ -9,8 +9,14 @@ edition = "2018"
 build = "build.rs"
 
 [dependencies]
-prost = "0.5"
+byteorder = "1"
 bytes = "0.4"
+comm = { git = "https://github.com/hamersaw/comm-rs" }
+crc = "1.0"
+crossbeam-channel = "0.3"
+log = "0.4"
+prost = "0.5"
+rand = "0.6"
 
 [build-dependencies]
 prost-build = "0.5"
