@@ -1,6 +1,5 @@
 use prost_build::Config;
 
-use std;
 use std::path::PathBuf;
 
 fn main() {

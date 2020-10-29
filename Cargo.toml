@@ -1,6 +1,6 @@
 [package]
-name = "hdfs-comm-rs"
-version = "0.1.0"
+name = "hdfs-comm"
+version = "0.1.1"
 authors = ["Daniel Rammer <hamersaw@protonmail.com>"]
 edition = "2018"
 
@@ -11,7 +11,7 @@ build = "build.rs"
 [dependencies]
 byteorder = "1"
 bytes = "0.4"
-comm = { git = "https://github.com/hamersaw/comm-rs" }
+comm = { path = "../comm-rs" }
 crc = "1.0"
 crossbeam-channel = "0.3"
 log = "0.4"

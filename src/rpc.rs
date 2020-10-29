@@ -10,8 +10,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::RwLock;
 
-static CONNECTION_HEADER: [u8; 7] = ['h' as u8,
-    'r' as u8, 'p' as u8, 'c' as u8, 9, 0, 0];
+static CONNECTION_HEADER: [u8; 7] = [b'h', b'r', b'p', b'c', 9, 0, 0];
 
 pub trait Protocol: Send + Sync {
     fn process(&self, user: &Option<String>, method: &str,
@@ -22,13 +21,15 @@ pub struct Protocols {
     map: RwLock<HashMap<String, Box<dyn Protocol>>>,
 }
 
-impl Protocols {
-    pub fn new() -> Protocols {
+impl Default for Protocols {
+    fn default() -> Self {
         Protocols {
             map: RwLock::new(HashMap::new()),
         }
     }
+}
 
+impl Protocols {
     pub fn register(&mut self, protocol_name: &str,
             protocol: Box<dyn Protocol>) {
         let mut map = self.map.write().unwrap();
@@ -122,7 +123,7 @@ impl StreamHandler for Protocols {
                     // get protocol
                     let protocol_result = protocols.get(&request_header
                         .declaring_class_protocol_name);
-                    if let None = protocol_result {
+                    if protocol_result.is_none() {
                         error!("protocol '{}' does not exist",
                             &request_header.declaring_class_protocol_name);
                     }
@@ -180,7 +181,7 @@ impl Client {
 
         Ok(
             Client {
-                stream: stream,
+                stream,
             }
         )
     }
@@ -229,4 +230,95 @@ impl Client {
 
 fn calculate_length(length: usize) -> usize {
     length + prost::encoding::encoded_len_varint(length as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Client, Protocol, Protocols};
+    use crate::protos::hdfs::DatanodeLocalInfoProto;
+
+    use comm::Server;
+    use prost::Message;
+
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    struct NullProtocol {
+    }
+
+    impl Protocol for NullProtocol {
+        fn process(&self, _user: &Option<String>, method: &str,
+                req_buf: &[u8], resp_buf: &mut Vec<u8>) -> std::io::Result<()> {
+            match method {
+                "test" => self.test(req_buf, resp_buf)?,
+                _ => error!("unimplemented method '{}'", method),
+            }
+
+            Ok(())
+        }
+    }
+
+    impl NullProtocol {
+        fn test(&self, req_buf: &[u8],
+                resp_buf: &mut Vec<u8>) -> std::io::Result<()> {
+            let request = DatanodeLocalInfoProto
+                ::decode_length_delimited(req_buf)?;
+            request.encode_length_delimited(resp_buf)?;
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn protocol() {
+        let ip_address = "127.0.0.1";
+        let port = 19001;
+        let protocol = "test.example";
+
+        // register protocols
+        let mut protocols = Protocols::default();
+        protocols.register(&protocol, Box::new(NullProtocol{ }));
+
+        // initialize Server
+        let listener = TcpListener::bind(&format!("{}:{}",
+            &ip_address, port)).expect("bind listener");
+
+        let handler = Arc::new(protocols);
+        let mut server = Server::new(listener, 50, handler);
+     
+        // start server
+        server.start_threadpool(2).expect("start server");
+
+        // connect client and send requests
+        {
+            let mut client = Client::new(&ip_address, port)
+                .expect("initialize client");
+
+            // send valid message
+            let request = DatanodeLocalInfoProto::default();
+            let (_, resp_buf) = client.write_message(&protocol, 
+                "test", request).expect("client write valid message");
+
+            let _ = DatanodeLocalInfoProto
+                ::decode_length_delimited(resp_buf)
+                    .expect("decode response");
+
+            // send invalid message protocol
+            let request = DatanodeLocalInfoProto::default();
+            let result = client.write_message(
+                "invalid.protocol", "test", request);
+
+            assert!(result.is_err());
+
+            // send invalid message method
+            let request = DatanodeLocalInfoProto::default();
+            let result = client.write_message(
+                "&protocol", "invalid_method", request);
+
+            assert!(result.is_err());
+        }
+
+        // stop server
+        server.stop().expect("stop server");
+    }
 }

@@ -4,7 +4,6 @@ use prost::Message;
 
 use crate::protos::hdfs::{PacketHeaderProto, PipelineAckProto};
 
-use std;
 use std::io::{BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -37,7 +36,7 @@ impl BlockOutputStream {
 
         let ra_stream = stream.try_clone().unwrap();
         let (ra_sequence_num, ra_ack_sequence_num) =
-            (sequence_num.clone(), ack_sequence_num.clone());
+            (sequence_num.clone(), ack_sequence_num);
         let ra_last_packet = last_packet.clone();
 
         let recv_acks_handle = std::thread::spawn(move || {
@@ -60,7 +59,7 @@ impl BlockOutputStream {
             chunk_size_bytes as usize * chunks_per_packet as usize;
 
         BlockOutputStream {
-            sender: sender,
+            sender,
             recv_acks_handle: Some(recv_acks_handle),
             send_chunks_handle: Some(send_chunks_handle),
             buffer: vec![0u8; buffer_length],
@@ -69,7 +68,7 @@ impl BlockOutputStream {
     }
 
     pub fn close(mut self) {
-        if let None = self.recv_acks_handle {
+        if self.recv_acks_handle.is_none() {
             return;
         }
 
@@ -171,9 +170,9 @@ fn send_chunks(stream: TcpStream, receiver: Receiver<Vec<u8>>,
 
         // write packet header proto
         let packet_header_proto = PacketHeaderProto {
-                offset_in_block: offset_in_block,
+                offset_in_block,
                 seqno: sequence_num.load(Ordering::SeqCst),
-                last_packet_in_block: buf.len() == 0,
+                last_packet_in_block: buf.is_empty(),
                 data_len: buf.len() as i32,
                 sync_block: Some(false),
             };
@@ -201,7 +200,7 @@ fn send_chunks(stream: TcpStream, receiver: Receiver<Vec<u8>>,
         stream.flush()?;
 
         // if last packet -> break from loop
-        if buf.len() == 0 {
+        if buf.is_empty() {
             last_packet.store(true, Ordering::SeqCst);
             break;
         }
@@ -241,7 +240,7 @@ impl BlockInputStream {
 
         // calculate buffer length
         BlockInputStream {
-            receiver: receiver,
+            receiver,
             join_handle: Some(join_handle),
             buffer: vec![0u8; buffer_length],
             start_index: 0,
@@ -250,7 +249,7 @@ impl BlockInputStream {
     }
 
     pub fn close(mut self) {
-        if let None = self.join_handle {
+        if self.join_handle.is_none() {
             return;
         }
 
@@ -282,10 +281,8 @@ impl BlockInputStream {
 impl Read for BlockInputStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // if no data in buffer -> fill buffer
-        if self.start_index == self.end_index {
-            if self.fill()? == 0 {
-                return Ok(0);
-            }
+        if self.start_index == self.end_index && self.fill()? == 0 {
+            return Ok(0);
         }
 
         // copy data
@@ -347,22 +344,23 @@ fn recv_chunks(mut stream: TcpStream, sender: Sender<Vec<u8>>) -> std::io::Resul
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
+    use crate::block::{BlockInputStream, BlockOutputStream};
+
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
     #[test]
     fn transfer_random_block() {
-        use rand::Rng;
-
-        use crate::block::{BlockInputStream, BlockOutputStream};
-
-        use std::io::{Read, Write};
-        use std::net::{TcpListener, TcpStream};
+        let address = "127.0.0.1:19000";
 
         // generate random block
-        //let block_size = 67108864;
         let block_size = 1048576;
         let mut block: Vec<u8> = Vec::new();
 
         let mut rng = rand::thread_rng();
-        for i in 0..block_size {
+        for _ in 0..block_size {
             block.push(rng.gen());
         }
 
@@ -371,36 +369,37 @@ mod tests {
         let chunks_per_packet = 3;
 
         // start server thread
-        let listener = TcpListener::bind("127.0.0.1:15605").unwrap();
+        let listener = TcpListener::bind(&address)
+            .expect("bind TcpListener");
+
         let join_handle = std::thread::spawn(move || {
             // accept connection
-            let (stream, _) = listener.accept().unwrap();;
+            let (stream, _) = listener.accept().expect("accept stream");
 
             // write block to stream
             let mut out_stream: BlockOutputStream =
                 BlockOutputStream::new(stream, 0,
                     chunk_size_bytes, chunks_per_packet);
 
-            out_stream.write_all(&block);
+            out_stream.write_all(&block).expect("write all block");
             out_stream.close();
         });
 
         // connect to server
-        match TcpStream::connect("127.0.0.1:15605") {
-            Ok(stream) => {
-                // read block from stream
-                let mut in_stream = BlockInputStream::new(
-                    stream, chunk_size_bytes, chunks_per_packet);
+        let stream = TcpStream::connect(&address)
+            .expect("connect TcpStream");
 
-                let mut buf = Vec::new();
-                in_stream.read_to_end(&mut buf);
-                in_stream.close();
-                println!("buf len: {}", buf.len());
-            },
-            Err(e) => println!("failed to connect to server"),
-        }
+        // read block from stream
+        let mut in_stream = BlockInputStream::new(
+            stream, chunk_size_bytes, chunks_per_packet);
+
+        let mut buf = Vec::new();
+        in_stream.read_to_end(&mut buf).expect("read to end block");
+        in_stream.close();
+
+        assert_eq!(buf.len(), block_size);
 
         // join server thread
-        join_handle.join();
+        join_handle.join().expect("join server thread");
     }
 }
